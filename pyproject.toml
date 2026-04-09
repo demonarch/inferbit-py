@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inferbit"
+version = "0.1.0"
+description = "BitNet-level inference for any open LLM — no retraining required"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+keywords = ["llm", "inference", "quantization", "bitnet"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "huggingface-hub>=0.20",
+]
+
+[project.optional-dependencies]
+cli = [
+    "typer>=0.9",
+    "rich>=13.0",
+]
+server = [
+    "fastapi>=0.109",
+    "uvicorn>=0.27",
+    "sse-starlette>=1.8",
+]
+all = [
+    "inferbit[cli]",
+    "inferbit[server]",
+]
+
+[project.scripts]
+inferbit = "inferbit_cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/inferbit/inferbit"
+Repository = "https://github.com/inferbit/inferbit"
+
+[tool.setuptools.packages.find]
+include = ["inferbit*"]
