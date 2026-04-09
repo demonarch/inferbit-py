@@ -158,22 +158,36 @@ class InferbitModel:
     def stream_tokens(
         self, input_tokens: list[int], max_tokens: int = 256, **kwargs
     ) -> Iterator[int]:
-        """Stream generated token IDs."""
-        tokens = []
+        """Stream generated token IDs one at a time."""
+        import queue
+        import threading
+
+        q: queue.Queue = queue.Queue()
         n_in = len(input_tokens)
         in_arr = (c_int32 * n_in)(*input_tokens)
         params = self._make_params(max_tokens=max_tokens, **kwargs)
 
         @StreamCallback
         def callback(token_id, ctx):
-            tokens.append(token_id)
+            q.put(token_id)
             return 1
 
-        self._lib.inferbit_generate_stream(
-            self._ptr, in_arr, n_in, callback, None, params
-        )
+        def run():
+            self._lib.inferbit_generate_stream(
+                self._ptr, in_arr, n_in, callback, None, params
+            )
+            q.put(None)  # Sentinel
 
-        yield from tokens
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+
+        while True:
+            token_id = q.get()
+            if token_id is None:
+                break
+            yield token_id
+
+        thread.join()
 
     def forward(self, tokens: list[int]) -> list[float]:
         """Run a forward pass and return logits."""
