@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "inferbit"
 version = "0.1.0"
-description = "BitNet-level inference for any open LLM — no retraining required"
+description = "Run any open LLM on CPU. One command."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -47,3 +47,6 @@ Repository = "https://github.com/inferbit/inferbit"
 
 [tool.setuptools.packages.find]
 include = ["inferbit*"]
+
+[tool.setuptools.package-data]
+inferbit = ["*.so", "*.dylib", "*.dll"]

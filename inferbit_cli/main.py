@@ -1,10 +1,16 @@
 """InferBit CLI — quantize, chat, bench, serve, info."""
 
-import typer
+try:
+    import typer
+except ImportError:
+    import sys
+    print("InferBit CLI requires extra dependencies.")
+    print("Install with: pip install inferbit[cli]")
+    sys.exit(1)
 
 app = typer.Typer(
     name="inferbit",
-    help="BitNet-level inference for any open LLM",
+    help="Run any open LLM on CPU",
     no_args_is_help=True,
 )
 
