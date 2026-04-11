@@ -1,0 +1,3 @@
+[submodule "libinferbit"]
+	path = libinferbit
+	url = https://github.com/demonarch/libinferbit.git

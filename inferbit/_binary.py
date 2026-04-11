@@ -32,17 +32,23 @@ def find_library() -> str:
         return str(bundled)
 
     # 3. In the build directory (development)
-    # From modules/inferbit-py/inferbit/ → modules/libinferbit/build/
-    repo_root = pkg_dir.parent.parent.parent  # inferbit-py → modules → repo root
-    build_lib = repo_root / "modules" / "libinferbit" / "build" / name
+    # Submodule: inferbit-py/libinferbit/build/
+    repo_dir = pkg_dir.parent  # inferbit-py/
+    build_lib = repo_dir / "libinferbit" / "build" / name
     if build_lib.exists():
         return str(build_lib)
 
-    # Sibling module (when inside modules/)
-    modules_dir = pkg_dir.parent.parent
+    # Parent monorepo: modules/libinferbit/build/
+    modules_dir = repo_dir.parent
     build_lib2 = modules_dir / "libinferbit" / "build" / name
     if build_lib2.exists():
         return str(build_lib2)
+
+    # Monorepo root: inferbit/modules/libinferbit/build/
+    repo_root = modules_dir.parent
+    build_lib3 = repo_root / "modules" / "libinferbit" / "build" / name
+    if build_lib3.exists():
+        return str(build_lib3)
 
     # 4. System library path
     for d in ["/usr/local/lib", "/usr/lib"]:

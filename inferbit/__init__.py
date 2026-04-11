@@ -6,7 +6,7 @@ from .ollama import resolve_ollama_model, list_ollama_models
 from .eval import EvalGates, EvalResult, evaluate_model_gates, load_token_samples
 from .calibrate import QuantProfile, CalibrateResult, search_quantization_profile
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "InferbitModel",
     "convert",

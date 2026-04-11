@@ -36,13 +36,13 @@ jobs:
 
       - name: Build libinferbit
         run: |
-          cd modules/libinferbit
+          cd libinferbit
           cmake -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build
 
       - name: Run C tests
         run: |
-          cd modules/libinferbit
+          cd libinferbit
           ./build/test_inferbit
           ./build/test_ibf_loader
           ./build/test_forward
@@ -55,26 +55,21 @@ jobs:
 
       - name: Bundle library into package
         run: |
-          cd modules/inferbit-py
           mkdir -p inferbit
-
-          # Copy the built library
           if [ "${{ runner.os }}" = "macOS" ]; then
-            cp ../libinferbit/build/libinferbit.dylib inferbit/
+            cp libinferbit/build/libinferbit.dylib inferbit/
           else
-            cp ../libinferbit/build/libinferbit.so inferbit/
+            cp libinferbit/build/libinferbit.so inferbit/
           fi
 
       - name: Build wheel
         run: |
-          cd modules/inferbit-py
           pip install setuptools wheel build
           python -m build --wheel
 
       - name: Rename wheel with platform tag
         run: |
-          cd modules/inferbit-py/dist
-          # Rename from py3-none-any to platform-specific
+          cd dist
           for f in *.whl; do
             new=$(echo "$f" | sed "s/py3-none-any/py3-none-${{ matrix.plat }}/")
             mv "$f" "$new"
@@ -83,7 +78,6 @@ jobs:
 
       - name: Run Python tests
         run: |
-          cd modules/inferbit-py
           pip install dist/*.whl'[cli]'
           pip install pytest
           pytest tests/ -v
@@ -92,7 +86,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.plat }}
-          path: modules/inferbit-py/dist/*.whl
+          path: dist/*.whl
 
   publish:
     needs: build-wheels
