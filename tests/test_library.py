@@ -14,7 +14,14 @@ os.environ.setdefault(
     ),
 )
 
-from inferbit import InferbitModel, convert
+from inferbit import (
+    InferbitModel,
+    convert,
+    EvalGates,
+    evaluate_model_gates,
+    load_token_samples,
+    search_quantization_profile,
+)
 
 # Model dimensions
 HIDDEN = 64
@@ -111,6 +118,78 @@ class TestConvert:
 
         convert(st_path, ibf_path, progress=on_progress)
         assert len(stages) > 0
+
+
+class TestEvalHarness:
+    def test_load_token_samples(self, tmp_path):
+        ds = tmp_path / "tokens.jsonl"
+        ds.write_text('{"tokens": [1, 2, 3, 4]}\n[5, 6, 7]\n{"tokens": [9]}\n', encoding="utf-8")
+        samples = load_token_samples(str(ds))
+        assert samples == [[1, 2, 3, 4], [5, 6, 7]]
+
+    def test_evaluate_model_gates_pass(self, fake_model):
+        model = InferbitModel.load(fake_model)
+        result = evaluate_model_gates(
+            model,
+            token_samples=[[1, 2, 3, 4], [4, 3, 2, 1]],
+            output_tokens=8,
+            warmup_runs=0,
+            measured_runs=1,
+            gates=EvalGates(max_perplexity=1e9, min_tokens_per_sec=0.0, max_memory_mb=1e9),
+        )
+        assert result.passes is True
+        assert result.perplexity is not None
+        assert result.tokens_per_sec > 0
+
+    def test_evaluate_model_gates_fail(self, fake_model):
+        model = InferbitModel.load(fake_model)
+        result = evaluate_model_gates(
+            model,
+            token_samples=[[1, 2, 3, 4]],
+            output_tokens=8,
+            warmup_runs=0,
+            measured_runs=1,
+            gates=EvalGates(min_tokens_per_sec=1e9),
+        )
+        assert result.passes is False
+        assert any("tokens/sec" in msg for msg in result.failed_gates)
+
+    def test_search_quantization_profile_selects_first_passing(self, tmp_path):
+        st_path = str(tmp_path / "model.safetensors")
+        _write_fake_safetensors(st_path)
+
+        out_dir = str(tmp_path / "calib")
+        result = search_quantization_profile(
+            st_path,
+            output_dir=out_dir,
+            token_dataset=None,
+            output_tokens=8,
+            warmup_runs=0,
+            measured_runs=1,
+            gates=EvalGates(),
+        )
+
+        assert result.selected.bits == 2
+        assert os.path.isfile(result.model_path)
+
+    def test_search_quantization_profile_falls_back_when_gates_fail(self, tmp_path):
+        st_path = str(tmp_path / "model.safetensors")
+        _write_fake_safetensors(st_path)
+
+        out_dir = str(tmp_path / "calib_fail")
+        result = search_quantization_profile(
+            st_path,
+            output_dir=out_dir,
+            token_dataset=None,
+            output_tokens=8,
+            warmup_runs=0,
+            measured_runs=1,
+            gates=EvalGates(min_tokens_per_sec=1e9),
+        )
+
+        # None pass: fallback should be last profile (INT8)
+        assert result.selected.bits == 8
+        assert result.eval_result.passes is False
 
 
 class TestModel:
