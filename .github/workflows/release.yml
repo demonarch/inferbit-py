@@ -12,22 +12,47 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS Apple Silicon (native)
           - os: macos-14
             plat: macosx_11_0_arm64
             lib: libinferbit.dylib
-            test_cmd: ./build/test_inferbit && ./build/test_ibf_loader && ./build/test_forward && ./build/test_convert
+            cmake_extra: ""
+            can_test: true
+
+          # macOS Intel (cross-compile on ARM runner)
+          - os: macos-14
+            plat: macosx_10_15_x86_64
+            lib: libinferbit.dylib
+            cmake_extra: "-DCMAKE_OSX_ARCHITECTURES=x86_64"
+            can_test: false
+
+          # Linux x86_64 (native)
           - os: ubuntu-latest
             plat: manylinux_2_17_x86_64
             lib: libinferbit.so
-            test_cmd: ./build/test_inferbit && ./build/test_ibf_loader && ./build/test_forward && ./build/test_convert
+            cmake_extra: ""
+            can_test: true
+
+          # Linux ARM64 (native)
           - os: ubuntu-24.04-arm
             plat: manylinux_2_17_aarch64
             lib: libinferbit.so
-            test_cmd: ./build/test_inferbit && ./build/test_ibf_loader && ./build/test_forward && ./build/test_convert
+            cmake_extra: ""
+            can_test: true
+
+          # Windows x64 (native)
           - os: windows-latest
             plat: win_amd64
             lib: Release/inferbit.dll
-            test_cmd: build\\Release\\test_inferbit.exe && build\\Release\\test_ibf_loader.exe && build\\Release\\test_forward.exe && build\\Release\\test_convert.exe
+            cmake_extra: "-A x64"
+            can_test: true
+
+          # Windows ARM64 (cross-compile)
+          - os: windows-latest
+            plat: win_arm64
+            lib: Release/inferbit.dll
+            cmake_extra: "-A ARM64"
+            can_test: false
 
     runs-on: ${{ matrix.os }}
 
@@ -46,19 +71,31 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd libinferbit
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_extra }}
           cmake --build build
 
       - name: Build libinferbit (Windows)
         if: runner.os == 'Windows'
         run: |
           cd libinferbit
-          cmake -B build
+          cmake -B build ${{ matrix.cmake_extra }}
           cmake --build build --config Release
 
       - name: Run C tests
+        if: matrix.can_test
         working-directory: libinferbit
-        run: ${{ matrix.test_cmd }}
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            build/Release/test_inferbit.exe
+            build/Release/test_ibf_loader.exe
+            build/Release/test_forward.exe
+            build/Release/test_convert.exe
+          else
+            ./build/test_inferbit
+            ./build/test_ibf_loader
+            ./build/test_forward
+            ./build/test_convert
+          fi
         shell: bash
 
       - name: Set up Python
@@ -84,6 +121,7 @@ jobs:
         shell: bash
 
       - name: Install and test
+        if: matrix.can_test
         run: |
           WHEEL=$(ls dist/*.whl | head -1)
           pip install "${WHEEL}[cli]"
