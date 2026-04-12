@@ -15,12 +15,19 @@ jobs:
           - os: macos-14
             plat: macosx_11_0_arm64
             lib: libinferbit.dylib
+            test_cmd: ./build/test_inferbit && ./build/test_ibf_loader && ./build/test_forward && ./build/test_convert
           - os: ubuntu-latest
             plat: manylinux_2_17_x86_64
             lib: libinferbit.so
+            test_cmd: ./build/test_inferbit && ./build/test_ibf_loader && ./build/test_forward && ./build/test_convert
           - os: ubuntu-24.04-arm
             plat: manylinux_2_17_aarch64
             lib: libinferbit.so
+            test_cmd: ./build/test_inferbit && ./build/test_ibf_loader && ./build/test_forward && ./build/test_convert
+          - os: windows-latest
+            plat: win_amd64
+            lib: Release/inferbit.dll
+            test_cmd: build\\Release\\test_inferbit.exe && build\\Release\\test_ibf_loader.exe && build\\Release\\test_forward.exe && build\\Release\\test_convert.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -35,19 +42,24 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cmake gcc
 
-      - name: Build libinferbit
+      - name: Build libinferbit (Unix)
+        if: runner.os != 'Windows'
         run: |
           cd libinferbit
           cmake -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build
 
-      - name: Run C tests
+      - name: Build libinferbit (Windows)
+        if: runner.os == 'Windows'
         run: |
           cd libinferbit
-          ./build/test_inferbit
-          ./build/test_ibf_loader
-          ./build/test_forward
-          ./build/test_convert
+          cmake -B build
+          cmake --build build --config Release
+
+      - name: Run C tests
+        working-directory: libinferbit
+        run: ${{ matrix.test_cmd }}
+        shell: bash
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -59,6 +71,7 @@ jobs:
           cp libinferbit/build/${{ matrix.lib }} inferbit/
           pip install setuptools wheel build
           python -m build --wheel
+        shell: bash
 
       - name: Rename wheel with platform tag
         run: |
@@ -68,6 +81,7 @@ jobs:
             mv "$f" "$new"
           done
           ls -la *.whl
+        shell: bash
 
       - name: Install and test
         run: |
@@ -75,6 +89,7 @@ jobs:
           pip install "${WHEEL}[cli]"
           pip install pytest
           pytest tests/ -v
+        shell: bash
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
