@@ -42,8 +42,9 @@ all = [
 inferbit = "inferbit_cli.main:app"
 
 [project.urls]
-Homepage = "https://github.com/inferbit/inferbit"
-Repository = "https://github.com/inferbit/inferbit"
+Homepage = "https://github.com/demonarch/inferbit-py"
+Repository = "https://github.com/demonarch/inferbit-py"
+Issues = "https://github.com/demonarch/inferbit-py/issues"
 
 [tool.setuptools.packages.find]
 include = ["inferbit*"]
