@@ -138,6 +138,8 @@ def _setup_signatures(lib):
     lib.inferbit_set_draft_model.argtypes = [c_void_p, c_void_p, c_int]
     lib.inferbit_unset_draft_model.restype = None
     lib.inferbit_unset_draft_model.argtypes = [c_void_p]
+    lib.inferbit_set_prompt_lookup.restype = None
+    lib.inferbit_set_prompt_lookup.argtypes = [c_void_p, c_int, c_int]
 
     # Convert
     lib.inferbit_default_convert_config.restype = ConvertConfig
