@@ -216,6 +216,30 @@ class InferbitModel:
     def kv_length(self) -> int:
         return self._lib.inferbit_kv_length(self._ptr)
 
+    # ── Speculative decoding ────────────────────────────────────
+
+    def set_draft_model(self, draft, draft_tokens: int = 4):
+        """Attach a sibling model as draft for speculative decoding.
+
+        Requires matching vocab and greedy sampling (temperature < 0.01).
+        Call unset_draft_model() to detach. Takes precedence over
+        set_prompt_lookup() when both configured.
+        """
+        if draft is None:
+            self._lib.inferbit_unset_draft_model(self._ptr)
+            return
+        self._lib.inferbit_set_draft_model(self._ptr, draft._ptr, draft_tokens)
+
+    def unset_draft_model(self):
+        self._lib.inferbit_unset_draft_model(self._ptr)
+
+    def set_prompt_lookup(self, ngram: int, k: int):
+        """Enable draft-less speculation via n-gram match over running history.
+
+        ngram=0 disables. Typical: ngram=2 or 3, k=4 to 10. Greedy-only.
+        """
+        self._lib.inferbit_set_prompt_lookup(self._ptr, ngram, k)
+
     # ── Model info ──────────────────────────────────────────────
 
     @property
