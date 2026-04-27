@@ -114,15 +114,17 @@ def reconstruct(t: PQTensor) -> np.ndarray:
         inner_mask[t.outlier_cols] = False
     inner_idx = np.flatnonzero(inner_mask)
 
-    chunks = np.empty((M, C, G), dtype=np.float16)
-    chunks[:, :, : G // 2] = t.codebook_l1_l[t.indices_l1_l]
-    chunks[:, :, G // 2 :] = t.codebook_l1_r[t.indices_l1_r]
+    # Decode contract (see docs/26): all PQ arithmetic happens in fp32;
+    # the only fp16 rounding step is the final cast to fp16 below.
+    chunks = np.empty((M, C, G), dtype=np.float32)
+    chunks[:, :, : G // 2] = t.codebook_l1_l[t.indices_l1_l].astype(np.float32)
+    chunks[:, :, G // 2 :] = t.codebook_l1_r[t.indices_l1_r].astype(np.float32)
     if t.n_levels == 2:
-        chunks[:, :, : G // 2] += t.codebook_l2_l[t.indices_l2_l]
-        chunks[:, :, G // 2 :] += t.codebook_l2_r[t.indices_l2_r]
-    chunks *= t.row_scale[:, None, None]
+        chunks[:, :, : G // 2] += t.codebook_l2_l[t.indices_l2_l].astype(np.float32)
+        chunks[:, :, G // 2 :] += t.codebook_l2_r[t.indices_l2_r].astype(np.float32)
+    chunks *= t.row_scale[:, None, None].astype(np.float32)
 
-    W[:, inner_idx] = chunks.reshape(M, n_inner)
+    W[:, inner_idx] = chunks.reshape(M, n_inner).astype(np.float16)
 
     if t.outlier_cols is not None:
         out = t.outlier_sidecar.astype(np.float32) * t.outlier_scale.astype(np.float32)[None, :]
