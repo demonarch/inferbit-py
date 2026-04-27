@@ -133,6 +133,153 @@ def reconstruct(t: PQTensor) -> np.ndarray:
     return W
 
 
+def write_multi_tensor(path: str | Path, tensors: dict[str, PQTensor]) -> None:
+    """Write a multi-tensor IBF v5 file.
+
+    Each tensor's blocks are written as `<name>::<key>` in the JSON header
+    so block keys remain unique. Block layout per tensor matches
+    write_single_tensor; offsets are still relative to weight_data_start.
+    """
+    blocks: list[tuple[str, bytes]] = []
+    tensor_order: list[str] = []
+
+    def add(qkey: str, arr: np.ndarray) -> None:
+        blocks.append((qkey, np.ascontiguousarray(arr).tobytes()))
+
+    for name, t in tensors.items():
+        _check(t)
+        tensor_order.append(name)
+
+        def keyed(k: str) -> str:
+            return f"{name}::{k}"
+
+        add(keyed("codebook_l1_l"), t.codebook_l1_l)
+        add(keyed("codebook_l1_r"), t.codebook_l1_r)
+        add(keyed("indices_l1_l"), t.indices_l1_l)
+        add(keyed("indices_l1_r"), t.indices_l1_r)
+        add(keyed("row_scale"), t.row_scale)
+        if t.n_levels == 2:
+            add(keyed("codebook_l2_l"), t.codebook_l2_l)
+            add(keyed("codebook_l2_r"), t.codebook_l2_r)
+            add(keyed("indices_l2_l"), t.indices_l2_l)
+            add(keyed("indices_l2_r"), t.indices_l2_r)
+        if t.outlier_cols is not None:
+            add(keyed("outlier_cols"), t.outlier_cols)
+            add(keyed("outlier_sidecar"), t.outlier_sidecar)
+            add(keyed("outlier_scale"), t.outlier_scale)
+
+    # Reserve a generous JSON header for multi-tensor models.
+    json_reserve = max(32 * 1024, 2048 * len(tensor_order))
+    weight_data_start = _align(IBF_PREAMBLE + json_reserve)
+
+    offsets: dict[str, tuple[int, int]] = {}
+    cur = weight_data_start
+    for qkey, blob in blocks:
+        cur = _align(cur)
+        offsets[qkey] = (cur, len(blob))
+        cur += len(blob)
+    file_end = _align(cur)
+
+    tensors_json: dict[str, dict] = {}
+    for name, t in tensors.items():
+        meta: dict = {
+            "format": t.format_str(),
+            "shape": list(t.shape),
+            "G": t.G,
+            "K": t.K,
+            "n_levels": t.n_levels,
+            "rotate": bool(t.rotate),
+        }
+        if t.outlier_cols is not None:
+            meta["outlier"] = {"n_cols": int(t.outlier_cols.shape[0])}
+
+        keys = ["codebook_l1_l", "codebook_l1_r", "indices_l1_l", "indices_l1_r", "row_scale"]
+        if t.n_levels == 2:
+            keys += ["codebook_l2_l", "codebook_l2_r", "indices_l2_l", "indices_l2_r"]
+        if t.outlier_cols is not None:
+            keys += ["outlier_cols", "outlier_sidecar", "outlier_scale"]
+        for k in keys:
+            off, sz = offsets[f"{name}::{k}"]
+            meta[k] = {"offset": off - weight_data_start, "size": sz}
+        tensors_json[name] = meta
+
+    header = {
+        "ibf_version": IBF_VERSION,
+        "tensors": tensors_json,
+        "weight_data_start": weight_data_start,
+    }
+    header_bytes = json.dumps(header).encode("utf-8")
+    if len(header_bytes) > json_reserve:
+        raise RuntimeError(f"json header {len(header_bytes)} > reserve {json_reserve}")
+
+    with open(path, "wb") as f:
+        f.write(IBF_MAGIC)
+        f.write(struct.pack("<I", IBF_VERSION))
+        f.write(struct.pack("<I", json_reserve))
+        f.write(struct.pack("<I", 0))
+        f.write(b"\x00" * 12)
+        f.write(header_bytes)
+        f.write(b"\x00" * (json_reserve - len(header_bytes)))
+        last_end = weight_data_start
+        for qkey, blob in blocks:
+            off, sz = offsets[qkey]
+            f.seek(off)
+            f.write(blob)
+            last_end = off + sz
+        if file_end > last_end:
+            f.seek(file_end - 1)
+            f.write(b"\x00")
+
+
+def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
+    """Read a multi-tensor IBF v5 file written by `write_multi_tensor`."""
+    out: dict[str, PQTensor] = {}
+    with open(path, "rb") as f:
+        preamble = f.read(IBF_PREAMBLE)
+        assert preamble[:8] == IBF_MAGIC
+        version = struct.unpack("<I", preamble[8:12])[0]
+        assert version == IBF_VERSION
+        json_reserve = struct.unpack("<I", preamble[12:16])[0]
+        header_bytes = f.read(json_reserve).rstrip(b"\x00")
+        header = json.loads(header_bytes)
+        weight_data_start = header["weight_data_start"]
+
+        for name, m in header["tensors"].items():
+            def load(key: str, dtype, shape) -> np.ndarray:
+                off = m[key]["offset"] + weight_data_start
+                sz = m[key]["size"]
+                f.seek(off)
+                buf = f.read(sz)
+                return np.frombuffer(buf, dtype=dtype).reshape(shape).copy()
+
+            M, N = m["shape"]
+            G = m["G"]; K = m["K"]; n_levels = m["n_levels"]
+            n_outlier = m.get("outlier", {}).get("n_cols", 0)
+            n_inner = N - n_outlier
+            assert n_inner % G == 0
+            C = n_inner // G
+
+            t = PQTensor(
+                shape=(M, N), G=G, K=K, n_levels=n_levels, rotate=bool(m["rotate"]),
+                codebook_l1_l=load("codebook_l1_l", np.float16, (K, G // 2)),
+                codebook_l1_r=load("codebook_l1_r", np.float16, (K, G // 2)),
+                indices_l1_l=load("indices_l1_l", np.uint8, (M, C)),
+                indices_l1_r=load("indices_l1_r", np.uint8, (M, C)),
+                row_scale=load("row_scale", np.float16, (M,)),
+            )
+            if n_levels == 2:
+                t.codebook_l2_l = load("codebook_l2_l", np.float16, (K, G // 2))
+                t.codebook_l2_r = load("codebook_l2_r", np.float16, (K, G // 2))
+                t.indices_l2_l  = load("indices_l2_l", np.uint8, (M, C))
+                t.indices_l2_r  = load("indices_l2_r", np.uint8, (M, C))
+            if n_outlier > 0:
+                t.outlier_cols    = load("outlier_cols", np.int32, (n_outlier,))
+                t.outlier_sidecar = load("outlier_sidecar", np.int8, (M, n_outlier))
+                t.outlier_scale   = load("outlier_scale", np.float16, (n_outlier,))
+            out[name] = t
+    return out
+
+
 def write_single_tensor(path: str | Path, name: str, t: PQTensor) -> None:
     """Write a single-tensor IBF v5 file. Used for roundtrip tests."""
     _check(t)
