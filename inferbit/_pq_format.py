@@ -45,14 +45,25 @@ class PQTensor:
 
     row_scale: np.ndarray      # [M] fp16
 
-    codebook_l2_l: Optional[np.ndarray] = None
-    codebook_l2_r: Optional[np.ndarray] = None
-    indices_l2_l:  Optional[np.ndarray] = None
+    # L2 codebook may use a smaller K than L1 (e.g. K_l2=16 to hit 5–6 bpw).
+    # When K_l2 is None, defaults to K. When K_l2=16, indices_l2_*
+    # arrays are bit-packed: 2 4-bit indices per byte.
+    K_l2: Optional[int] = None
+    codebook_l2_l: Optional[np.ndarray] = None      # [K_l2, G/2] fp16
+    codebook_l2_r: Optional[np.ndarray] = None      # [K_l2, G/2] fp16
+    indices_l2_l:  Optional[np.ndarray] = None      # see _packed_l2_size below
     indices_l2_r:  Optional[np.ndarray] = None
 
     outlier_cols:    Optional[np.ndarray] = None  # [n_outlier] int32
     outlier_sidecar: Optional[np.ndarray] = None  # [M, n_outlier] int8
     outlier_scale:   Optional[np.ndarray] = None  # [n_outlier] fp16
+
+    def K_l2_effective(self) -> int:
+        return self.K_l2 if self.K_l2 is not None else self.K
+
+    def l2_packed(self) -> bool:
+        """K_l2 == 16 uses 4-bit packed indices."""
+        return self.K_l2_effective() == 16
 
     def format_str(self) -> str:
         has_outlier = self.outlier_cols is not None
@@ -81,10 +92,18 @@ def _check(t: PQTensor) -> None:
     if t.n_levels == 2:
         for arr in (t.codebook_l2_l, t.codebook_l2_r, t.indices_l2_l, t.indices_l2_r):
             assert arr is not None, "n_levels=2 requires level-2 arrays"
-        assert t.codebook_l2_l.shape == (t.K, t.G // 2) and t.codebook_l2_l.dtype == np.float16
-        assert t.codebook_l2_r.shape == (t.K, t.G // 2) and t.codebook_l2_r.dtype == np.float16
-        assert t.indices_l2_l.shape == (M, C) and t.indices_l2_l.dtype == np.uint8
-        assert t.indices_l2_r.shape == (M, C) and t.indices_l2_r.dtype == np.uint8
+        K_l2 = t.K_l2_effective()
+        assert K_l2 in (16, 64, 256), f"K_l2 must be 16, 64, or 256; got {K_l2}"
+        assert t.codebook_l2_l.shape == (K_l2, t.G // 2) and t.codebook_l2_l.dtype == np.float16
+        assert t.codebook_l2_r.shape == (K_l2, t.G // 2) and t.codebook_l2_r.dtype == np.float16
+        if t.l2_packed():
+            # Bit-packed: ceil(C / 2) bytes per row, 2 indices/byte.
+            packed_C = (C + 1) // 2
+            assert t.indices_l2_l.shape == (M, packed_C) and t.indices_l2_l.dtype == np.uint8
+            assert t.indices_l2_r.shape == (M, packed_C) and t.indices_l2_r.dtype == np.uint8
+        else:
+            assert t.indices_l2_l.shape == (M, C) and t.indices_l2_l.dtype == np.uint8
+            assert t.indices_l2_r.shape == (M, C) and t.indices_l2_r.dtype == np.uint8
 
     if t.outlier_cols is not None:
         assert t.outlier_sidecar is not None and t.outlier_scale is not None
@@ -120,8 +139,25 @@ def reconstruct(t: PQTensor) -> np.ndarray:
     chunks[:, :, : G // 2] = t.codebook_l1_l[t.indices_l1_l].astype(np.float32)
     chunks[:, :, G // 2 :] = t.codebook_l1_r[t.indices_l1_r].astype(np.float32)
     if t.n_levels == 2:
-        chunks[:, :, : G // 2] += t.codebook_l2_l[t.indices_l2_l].astype(np.float32)
-        chunks[:, :, G // 2 :] += t.codebook_l2_r[t.indices_l2_r].astype(np.float32)
+        if t.l2_packed():
+            # Unpack 4-bit indices: low nibble = chunk c (even), high = c+1 (odd).
+            il2l_packed = t.indices_l2_l   # [M, ceil(C/2)] uint8
+            il2r_packed = t.indices_l2_r
+            il2l = np.empty((M, C), dtype=np.uint8)
+            il2r = np.empty((M, C), dtype=np.uint8)
+            packed_C = il2l_packed.shape[1]
+            il2l[:, 0::2] = il2l_packed[:, :packed_C] & 0x0F
+            il2r[:, 0::2] = il2r_packed[:, :packed_C] & 0x0F
+            if C > 1:
+                il2l_high = (il2l_packed[:, : (C // 2)] >> 4) & 0x0F
+                il2r_high = (il2r_packed[:, : (C // 2)] >> 4) & 0x0F
+                il2l[:, 1::2] = il2l_high
+                il2r[:, 1::2] = il2r_high
+            chunks[:, :, : G // 2] += t.codebook_l2_l[il2l].astype(np.float32)
+            chunks[:, :, G // 2 :] += t.codebook_l2_r[il2r].astype(np.float32)
+        else:
+            chunks[:, :, : G // 2] += t.codebook_l2_l[t.indices_l2_l].astype(np.float32)
+            chunks[:, :, G // 2 :] += t.codebook_l2_r[t.indices_l2_r].astype(np.float32)
     chunks *= t.row_scale[:, None, None].astype(np.float32)
 
     W[:, inner_idx] = chunks.reshape(M, n_inner).astype(np.float16)
@@ -190,6 +226,8 @@ def write_multi_tensor(path: str | Path, tensors: dict[str, PQTensor]) -> None:
             "n_levels": t.n_levels,
             "rotate": bool(t.rotate),
         }
+        if t.n_levels == 2 and t.K_l2 is not None and t.K_l2 != t.K:
+            meta["K_l2"] = t.K_l2
         if t.outlier_cols is not None:
             meta["outlier"] = {"n_cols": int(t.outlier_cols.shape[0])}
 
@@ -254,6 +292,7 @@ def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
 
             M, N = m["shape"]
             G = m["G"]; K = m["K"]; n_levels = m["n_levels"]
+            K_l2 = m.get("K_l2")  # None when absent (defaults to K)
             n_outlier = m.get("outlier", {}).get("n_cols", 0)
             n_inner = N - n_outlier
             assert n_inner % G == 0
@@ -261,6 +300,7 @@ def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
 
             t = PQTensor(
                 shape=(M, N), G=G, K=K, n_levels=n_levels, rotate=bool(m["rotate"]),
+                K_l2=K_l2,
                 codebook_l1_l=load("codebook_l1_l", np.float16, (K, G // 2)),
                 codebook_l1_r=load("codebook_l1_r", np.float16, (K, G // 2)),
                 indices_l1_l=load("indices_l1_l", np.uint8, (M, C)),
@@ -268,10 +308,16 @@ def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
                 row_scale=load("row_scale", np.float16, (M,)),
             )
             if n_levels == 2:
-                t.codebook_l2_l = load("codebook_l2_l", np.float16, (K, G // 2))
-                t.codebook_l2_r = load("codebook_l2_r", np.float16, (K, G // 2))
-                t.indices_l2_l  = load("indices_l2_l", np.uint8, (M, C))
-                t.indices_l2_r  = load("indices_l2_r", np.uint8, (M, C))
+                K_l2_eff = K_l2 if K_l2 is not None else K
+                t.codebook_l2_l = load("codebook_l2_l", np.float16, (K_l2_eff, G // 2))
+                t.codebook_l2_r = load("codebook_l2_r", np.float16, (K_l2_eff, G // 2))
+                if K_l2_eff == 16:
+                    packed_C = (C + 1) // 2
+                    t.indices_l2_l = load("indices_l2_l", np.uint8, (M, packed_C))
+                    t.indices_l2_r = load("indices_l2_r", np.uint8, (M, packed_C))
+                else:
+                    t.indices_l2_l = load("indices_l2_l", np.uint8, (M, C))
+                    t.indices_l2_r = load("indices_l2_r", np.uint8, (M, C))
             if n_outlier > 0:
                 t.outlier_cols    = load("outlier_cols", np.int32, (n_outlier,))
                 t.outlier_sidecar = load("outlier_sidecar", np.int8, (M, n_outlier))
@@ -324,6 +370,8 @@ def write_single_tensor(path: str | Path, name: str, t: PQTensor) -> None:
         "n_levels": t.n_levels,
         "rotate": bool(t.rotate),
     }
+    if t.n_levels == 2 and t.K_l2 is not None and t.K_l2 != t.K:
+        tensor_meta["K_l2"] = t.K_l2
     if t.outlier_cols is not None:
         tensor_meta["outlier"] = {"n_cols": int(t.outlier_cols.shape[0])}
 
@@ -386,6 +434,7 @@ def read_single_tensor(path: str | Path) -> tuple[str, PQTensor]:
 
         M, N = m["shape"]
         G = m["G"]; K = m["K"]; n_levels = m["n_levels"]
+        K_l2 = m.get("K_l2")
         n_outlier = m.get("outlier", {}).get("n_cols", 0)
         n_inner = N - n_outlier
         assert n_inner % G == 0
@@ -393,6 +442,7 @@ def read_single_tensor(path: str | Path) -> tuple[str, PQTensor]:
 
         t = PQTensor(
             shape=(M, N), G=G, K=K, n_levels=n_levels, rotate=bool(m["rotate"]),
+            K_l2=K_l2,
             codebook_l1_l=load("codebook_l1_l", np.float16, (K, G // 2)),
             codebook_l1_r=load("codebook_l1_r", np.float16, (K, G // 2)),
             indices_l1_l=load("indices_l1_l", np.uint8, (M, C)),
@@ -401,10 +451,16 @@ def read_single_tensor(path: str | Path) -> tuple[str, PQTensor]:
         )
 
         if n_levels == 2:
-            t.codebook_l2_l = load("codebook_l2_l", np.float16, (K, G // 2))
-            t.codebook_l2_r = load("codebook_l2_r", np.float16, (K, G // 2))
-            t.indices_l2_l  = load("indices_l2_l", np.uint8, (M, C))
-            t.indices_l2_r  = load("indices_l2_r", np.uint8, (M, C))
+            K_l2_eff = K_l2 if K_l2 is not None else K
+            t.codebook_l2_l = load("codebook_l2_l", np.float16, (K_l2_eff, G // 2))
+            t.codebook_l2_r = load("codebook_l2_r", np.float16, (K_l2_eff, G // 2))
+            if K_l2_eff == 16:
+                packed_C = (C + 1) // 2
+                t.indices_l2_l = load("indices_l2_l", np.uint8, (M, packed_C))
+                t.indices_l2_r = load("indices_l2_r", np.uint8, (M, packed_C))
+            else:
+                t.indices_l2_l = load("indices_l2_l", np.uint8, (M, C))
+                t.indices_l2_r = load("indices_l2_r", np.uint8, (M, C))
 
         if n_outlier > 0:
             t.outlier_cols    = load("outlier_cols", np.int32, (n_outlier,))
