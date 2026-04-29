@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inferbit"
-version = "0.2.0"
+version = "0.2.1"
 description = "Run any open LLM on CPU. One command."
 readme = "README.md"
 license = "MIT"
