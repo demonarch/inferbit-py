@@ -1,6 +1,6 @@
 # InferBit
 
-Run any open LLM on CPU. One command.
+**v0.2.0** — Run any open LLM on CPU. One command.
 
 ```bash
 pip install inferbit[cli]
