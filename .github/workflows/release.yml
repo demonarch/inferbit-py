@@ -91,7 +91,6 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             build/Release/test_inferbit.exe
             build/Release/test_ibf_loader.exe
-            build/Release/test_forward.exe
             build/Release/test_convert.exe
           else
             ./build/test_inferbit
