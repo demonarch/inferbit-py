@@ -192,6 +192,44 @@ class Session:
         finally:
             self._lib.ib_pq_kv_cache_free(kv)
 
+    def generate_sample(
+        self,
+        prompt_ids: list[int] | np.ndarray,
+        max_new: int,
+        *,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        seed: int = 0,
+        max_seq: int = 512,
+        eos_token_id: int = -1,
+    ) -> list[int]:
+        prompt = np.ascontiguousarray(np.asarray(prompt_ids, dtype=np.int32))
+        kv = ctypes.c_void_p()
+        rc = self._lib.ib_pq_kv_cache_create(self._handle, max_seq, ctypes.byref(kv))
+        if rc != 0:
+            raise RuntimeError(f"kv create rc={rc}")
+        try:
+            out_ids = np.zeros(max_new, dtype=np.int32)
+            n_out = ctypes.c_int()
+            params = _ffi.IbPqSampleParams(
+                float(temperature), int(top_k), float(top_p), int(seed) & 0xFFFFFFFF
+            )
+            rc = self._lib.ib_pq_generate_sample(
+                self._handle, kv,
+                prompt.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+                int(len(prompt)), int(max_new), int(eos_token_id),
+                params,
+                out_ids.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+                ctypes.byref(n_out),
+                None, None,
+            )
+            if rc != 0:
+                raise RuntimeError(f"generate_sample rc={rc}")
+            return out_ids[: n_out.value].tolist()
+        finally:
+            self._lib.ib_pq_kv_cache_free(kv)
+
     def lm_head_topk(
         self,
         name: str,

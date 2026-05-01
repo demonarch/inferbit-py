@@ -43,6 +43,15 @@ class IbPqPolicy(Structure):
     ]
 
 
+class IbPqSampleParams(Structure):
+    _fields_ = [
+        ("temperature", c_float),
+        ("top_k", c_int),
+        ("top_p", c_float),
+        ("seed", ctypes.c_uint32),
+    ]
+
+
 # Variant constants (mirror ib_pq_variant in pq_decode.h)
 VARIANT_STREAMING = 0
 VARIANT_L1_ONLY = 1
@@ -214,5 +223,11 @@ def _setup_signatures(lib):
     lib.ib_pq_generate_greedy.restype = c_int
     lib.ib_pq_generate_greedy.argtypes = [c_void_p, c_void_p,
                                             POINTER(c_int), c_int, c_int, c_int,
+                                            POINTER(c_int), POINTER(c_int),
+                                            c_void_p, c_void_p]
+    lib.ib_pq_generate_sample.restype = c_int
+    lib.ib_pq_generate_sample.argtypes = [c_void_p, c_void_p,
+                                            POINTER(c_int), c_int, c_int, c_int,
+                                            IbPqSampleParams,
                                             POINTER(c_int), POINTER(c_int),
                                             c_void_p, c_void_p]
