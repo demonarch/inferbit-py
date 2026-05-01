@@ -102,6 +102,46 @@ class Session:
         if rc != 0:
             raise KeyError(name)
 
+    def set_layer_policy(
+        self,
+        layer_idx: int,
+        variant: int,
+        keys: tuple[str, ...] = (
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ),
+    ) -> int:
+        """Bulk-set policy across the listed projections of one layer.
+        Returns the number of tensors actually updated (silently skips
+        absent ones — a layer without attn keys is fine)."""
+        n = 0
+        for k in keys:
+            try:
+                self.set_policy(f"L{layer_idx}_{k}", variant)
+                n += 1
+            except KeyError:
+                pass
+        return n
+
+    def apply_layer_drop_profile(
+        self,
+        profile_path: str,
+        threshold_pct: float = 0.5,
+    ) -> list[int]:
+        """Phase 8.D: read a per-layer L2-drop profile and set L1_ONLY
+        policy on layers whose drop costs less than threshold_pct PPL.
+        Returns the list of layers configured for L1_ONLY."""
+        import json
+        with open(profile_path) as f:
+            prof = json.load(f)
+        cheap = [
+            s["layer"] for s in prof["per_layer_drop"]
+            if s["delta_vs_full_pct"] < threshold_pct
+        ]
+        for L in cheap:
+            self.set_layer_policy(L, _ffi.VARIANT_L1_ONLY)
+        return cheap
+
     def matmul(self, name: str, x: np.ndarray, out: Optional[np.ndarray] = None) -> np.ndarray:
         """Compute weights[name] @ x. C picks the kernel based on policy."""
         if x.dtype != np.float32 or not x.flags["C_CONTIGUOUS"]:
