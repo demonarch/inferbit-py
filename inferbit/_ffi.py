@@ -35,6 +35,22 @@ class SampleParams(Structure):
     ]
 
 
+class IbPqPolicy(Structure):
+    _fields_ = [
+        ("variant", c_int),
+        ("skip_threshold", c_float),
+        ("act_threshold", c_float),
+    ]
+
+
+# Variant constants (mirror ib_pq_variant in pq_decode.h)
+VARIANT_STREAMING = 0
+VARIANT_L1_ONLY = 1
+VARIANT_L2SKIP = 2
+VARIANT_SPARSE = 3
+VARIANT_INT8 = 4
+
+
 class ConvertConfig(Structure):
     _fields_ = [
         ("default_bits", c_int),
@@ -148,3 +164,27 @@ def _setup_signatures(lib):
     lib.inferbit_detect_format.argtypes = [c_char_p]
     lib.inferbit_convert.restype = c_int
     lib.inferbit_convert.argtypes = [c_char_p, c_char_p, POINTER(ConvertConfig)]
+
+    # ── PQ session (pq_decode.h) ──
+    lib.ib_pq_session_open.restype = c_int
+    lib.ib_pq_session_open.argtypes = [c_char_p, POINTER(c_void_p)]
+    lib.ib_pq_session_close.restype = None
+    lib.ib_pq_session_close.argtypes = [c_void_p]
+    lib.ib_pq_session_set_default_policy.restype = c_int
+    lib.ib_pq_session_set_default_policy.argtypes = [c_void_p, IbPqPolicy]
+    lib.ib_pq_session_set_policy.restype = c_int
+    lib.ib_pq_session_set_policy.argtypes = [c_void_p, c_char_p, IbPqPolicy]
+    lib.ib_pq_session_matmul.restype = c_int
+    lib.ib_pq_session_matmul.argtypes = [c_void_p, c_char_p,
+                                           POINTER(c_float), POINTER(c_float)]
+    lib.ib_pq_session_lm_head_topk.restype = c_int
+    lib.ib_pq_session_lm_head_topk.argtypes = [c_void_p, c_char_p,
+                                                 POINTER(c_float), c_int,
+                                                 POINTER(c_float), POINTER(c_int32)]
+    lib.ib_pq_session_tensor_shape.restype = c_int
+    lib.ib_pq_session_tensor_shape.argtypes = [c_void_p, c_char_p,
+                                                 POINTER(c_int), POINTER(c_int)]
+    lib.ib_pq_session_tensor_count.restype = c_int
+    lib.ib_pq_session_tensor_count.argtypes = [c_void_p]
+    lib.ib_pq_session_tensor_name.restype = c_char_p
+    lib.ib_pq_session_tensor_name.argtypes = [c_void_p, c_int]
