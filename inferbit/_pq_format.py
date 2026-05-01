@@ -65,8 +65,16 @@ class PQTensor:
         """K_l2 == 16 uses 4-bit packed indices."""
         return self.K_l2_effective() == 16
 
+    # If True, this tensor uses the pyramid format: n_levels=2 with the L2
+    # codebook flattened from a conditional [K_outer, K_inner, G/2] layout
+    # into [K_outer*K_inner, G/2], indexed by i2_combined = i1*K_inner + i2_local.
+    # K_l2 unrestricted (vs L1_L2 which requires {16, 64, K}).
+    pyramid: bool = False
+
     def format_str(self) -> str:
         has_outlier = self.outlier_cols is not None
+        if self.pyramid:
+            return "pq2d_v1_pyramid"
         if self.n_levels == 1:
             return "pq2d_v1_l1"
         if self.n_levels == 2 and not has_outlier:
@@ -93,14 +101,23 @@ def _check(t: PQTensor) -> None:
         for arr in (t.codebook_l2_l, t.codebook_l2_r, t.indices_l2_l, t.indices_l2_r):
             assert arr is not None, "n_levels=2 requires level-2 arrays"
         K_l2 = t.K_l2_effective()
-        assert K_l2 in (16, 64, 256), f"K_l2 must be 16, 64, or 256; got {K_l2}"
+        if t.pyramid:
+            # Pyramid: K_l2 = K_outer * K_inner, arbitrary value (no {16,64,256}
+            # restriction). Indices are uint8 if K_l2 <= 256, uint16 otherwise.
+            assert K_l2 > 0, f"pyramid K_l2 must be positive; got {K_l2}"
+            assert K_l2 <= 65535, f"pyramid K_l2 must fit in uint16; got {K_l2}"
+        else:
+            assert K_l2 in (16, 64, 256), f"K_l2 must be 16, 64, or 256; got {K_l2}"
         assert t.codebook_l2_l.shape == (K_l2, t.G // 2) and t.codebook_l2_l.dtype == np.float16
         assert t.codebook_l2_r.shape == (K_l2, t.G // 2) and t.codebook_l2_r.dtype == np.float16
         if t.l2_packed():
-            # Bit-packed: ceil(C / 2) bytes per row, 2 indices/byte.
             packed_C = (C + 1) // 2
             assert t.indices_l2_l.shape == (M, packed_C) and t.indices_l2_l.dtype == np.uint8
             assert t.indices_l2_r.shape == (M, packed_C) and t.indices_l2_r.dtype == np.uint8
+        elif t.pyramid and K_l2 > 256:
+            # Pyramid with K_l2 > 256: uint16 indices
+            assert t.indices_l2_l.shape == (M, C) and t.indices_l2_l.dtype == np.uint16
+            assert t.indices_l2_r.shape == (M, C) and t.indices_l2_r.dtype == np.uint16
         else:
             assert t.indices_l2_l.shape == (M, C) and t.indices_l2_l.dtype == np.uint8
             assert t.indices_l2_r.shape == (M, C) and t.indices_l2_r.dtype == np.uint8
@@ -297,6 +314,7 @@ def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
             n_inner = N - n_outlier
             assert n_inner % G == 0
             C = n_inner // G
+            is_pyramid = m.get("format") == "pq2d_v1_pyramid"
 
             t = PQTensor(
                 shape=(M, N), G=G, K=K, n_levels=n_levels, rotate=bool(m["rotate"]),
@@ -306,6 +324,7 @@ def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
                 indices_l1_l=load("indices_l1_l", np.uint8, (M, C)),
                 indices_l1_r=load("indices_l1_r", np.uint8, (M, C)),
                 row_scale=load("row_scale", np.float16, (M,)),
+                pyramid=is_pyramid,
             )
             if n_levels == 2:
                 K_l2_eff = K_l2 if K_l2 is not None else K
@@ -315,6 +334,10 @@ def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
                     packed_C = (C + 1) // 2
                     t.indices_l2_l = load("indices_l2_l", np.uint8, (M, packed_C))
                     t.indices_l2_r = load("indices_l2_r", np.uint8, (M, packed_C))
+                elif is_pyramid and K_l2_eff > 256:
+                    # Pyramid with K_l2 > 256: uint16 indices
+                    t.indices_l2_l = load("indices_l2_l", np.uint16, (M, C))
+                    t.indices_l2_r = load("indices_l2_r", np.uint16, (M, C))
                 else:
                     t.indices_l2_l = load("indices_l2_l", np.uint8, (M, C))
                     t.indices_l2_r = load("indices_l2_r", np.uint8, (M, C))
