@@ -162,6 +162,36 @@ class Session:
             return {}
         return _json.loads(p.decode())
 
+    def generate_greedy(
+        self,
+        prompt_ids: list[int] | np.ndarray,
+        max_new: int,
+        max_seq: int = 512,
+        eos_token_id: int = -1,
+    ) -> list[int]:
+        """Greedy generate. Builds + tears down its own KV cache."""
+        prompt = np.ascontiguousarray(np.asarray(prompt_ids, dtype=np.int32))
+        kv = ctypes.c_void_p()
+        rc = self._lib.ib_pq_kv_cache_create(self._handle, max_seq, ctypes.byref(kv))
+        if rc != 0:
+            raise RuntimeError(f"kv create rc={rc}")
+        try:
+            out_ids = np.zeros(max_new, dtype=np.int32)
+            n_out = ctypes.c_int()
+            rc = self._lib.ib_pq_generate_greedy(
+                self._handle, kv,
+                prompt.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+                int(len(prompt)), int(max_new), int(eos_token_id),
+                out_ids.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+                ctypes.byref(n_out),
+                None, None,
+            )
+            if rc != 0:
+                raise RuntimeError(f"generate rc={rc}")
+            return out_ids[: n_out.value].tolist()
+        finally:
+            self._lib.ib_pq_kv_cache_free(kv)
+
     def lm_head_topk(
         self,
         name: str,

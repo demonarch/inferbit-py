@@ -199,3 +199,20 @@ def _setup_signatures(lib):
                                            POINTER(c_int), POINTER(c_int)]
     lib.ib_pq_session_config_json.restype = c_char_p
     lib.ib_pq_session_config_json.argtypes = [c_void_p]
+
+    lib.ib_pq_kv_cache_create.restype = c_int
+    lib.ib_pq_kv_cache_create.argtypes = [c_void_p, c_int, POINTER(c_void_p)]
+    lib.ib_pq_kv_cache_free.restype = None
+    lib.ib_pq_kv_cache_free.argtypes = [c_void_p]
+    lib.ib_pq_kv_cache_clear.restype = None
+    lib.ib_pq_kv_cache_clear.argtypes = [c_void_p]
+    lib.ib_pq_kv_cache_length.restype = c_int
+    lib.ib_pq_kv_cache_length.argtypes = [c_void_p]
+    lib.ib_pq_forward_step.restype = c_int
+    lib.ib_pq_forward_step.argtypes = [c_void_p, c_void_p, c_int, c_int,
+                                         POINTER(c_float)]
+    lib.ib_pq_generate_greedy.restype = c_int
+    lib.ib_pq_generate_greedy.argtypes = [c_void_p, c_void_p,
+                                            POINTER(c_int), c_int, c_int, c_int,
+                                            POINTER(c_int), POINTER(c_int),
+                                            c_void_p, c_void_p]
