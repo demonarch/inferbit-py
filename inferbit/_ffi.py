@@ -188,3 +188,14 @@ def _setup_signatures(lib):
     lib.ib_pq_session_tensor_count.argtypes = [c_void_p]
     lib.ib_pq_session_tensor_name.restype = c_char_p
     lib.ib_pq_session_tensor_name.argtypes = [c_void_p, c_int]
+
+    lib.ib_pq_session_raw_count.restype = c_int
+    lib.ib_pq_session_raw_count.argtypes = [c_void_p]
+    lib.ib_pq_session_raw_name.restype = c_char_p
+    lib.ib_pq_session_raw_name.argtypes = [c_void_p, c_int]
+    lib.ib_pq_session_raw_get.restype = c_int
+    lib.ib_pq_session_raw_get.argtypes = [c_void_p, c_char_p,
+                                           POINTER(c_void_p), POINTER(c_int),
+                                           POINTER(c_int), POINTER(c_int)]
+    lib.ib_pq_session_config_json.restype = c_char_p
+    lib.ib_pq_session_config_json.argtypes = [c_void_p]

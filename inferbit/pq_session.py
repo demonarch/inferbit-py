@@ -7,11 +7,22 @@ gives idiomatic Python access.
 from __future__ import annotations
 
 import ctypes
+import json as _json
 from typing import Optional
 
 import numpy as np
 
 from . import _ffi
+
+
+_RAW_DTYPE_FROM_INT = {
+    0: np.float32,
+    1: np.float16,
+    2: np.int32,
+    3: np.int16,
+    4: np.int8,
+    5: np.uint8,
+}
 
 
 class Session:
@@ -110,6 +121,46 @@ class Session:
         if rc != 0:
             raise RuntimeError(f"matmul {name} rc={rc}")
         return out
+
+    def raw_names(self) -> list[str]:
+        n = self._lib.ib_pq_session_raw_count(self._handle)
+        out = []
+        for i in range(n):
+            p = self._lib.ib_pq_session_raw_name(self._handle, i)
+            out.append(p.decode() if p else "")
+        return out
+
+    def raw(self, name: str) -> np.ndarray:
+        """Zero-copy view of a raw tensor stored in the IBF.
+
+        The returned array borrows from the session — do NOT use after
+        session.close(). Make a .copy() if you need it to outlive.
+        """
+        data = ctypes.c_void_p()
+        dtype = ctypes.c_int()
+        ndim = ctypes.c_int()
+        shape = (ctypes.c_int * 4)()
+        rc = self._lib.ib_pq_session_raw_get(
+            self._handle, name.encode(),
+            ctypes.byref(data), ctypes.byref(dtype),
+            shape, ctypes.byref(ndim),
+        )
+        if rc != 0:
+            raise KeyError(f"raw tensor not found: {name}")
+        np_dtype = np.dtype(_RAW_DTYPE_FROM_INT[dtype.value])
+        shp = tuple(shape[d] for d in range(ndim.value))
+        nelem = 1
+        for d in shp:
+            nelem *= d
+        nbytes = nelem * np_dtype.itemsize
+        buf = (ctypes.c_uint8 * nbytes).from_address(data.value)
+        return np.frombuffer(buf, dtype=np_dtype).reshape(shp)
+
+    def config(self) -> dict:
+        p = self._lib.ib_pq_session_config_json(self._handle)
+        if not p:
+            return {}
+        return _json.loads(p.decode())
 
     def lm_head_topk(
         self,
