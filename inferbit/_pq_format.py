@@ -299,7 +299,8 @@ def write_multi_tensor(
         }
 
     # Reserve a generous JSON header for multi-tensor models.
-    json_reserve = max(32 * 1024, 2048 * len(tensor_order))
+    json_reserve = max(32 * 1024, 2048 * len(tensor_order),
+                        128 * (len(raw_tensors) + len(tensor_order)))
     weight_data_start = _align(IBF_PREAMBLE + json_reserve)
 
     offsets: dict[str, tuple[int, int]] = {}
