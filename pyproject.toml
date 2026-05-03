@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inferbit"
-version = "0.2.3"
+version = "0.3.0"
 description = "Run any open LLM on CPU. One command."
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "huggingface-hub>=0.20",
     "tokenizers>=0.15",
+    "numpy>=1.20",
 ]
 
 [project.optional-dependencies]
