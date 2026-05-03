@@ -65,8 +65,21 @@ class PQTensor:
         """K_l2 == 16 uses 4-bit packed indices."""
         return self.K_l2_effective() == 16
 
+    # If True, this tensor uses the pyramid format: n_levels=2 with the L2
+    # codebook flattened from a conditional [K_outer, K_inner, G/2] layout
+    # into [K_outer*K_inner, G/2], indexed by i2_combined = i1*K_inner + i2_local.
+    # K_l2 unrestricted (vs L1_L2 which requires {16, 64, K}).
+    pyramid: bool = False
+
+    # Phase 1.5: bit-packing for L2 indices. When set, writer packs L2 indices
+    # to N bits per index on disk (LSB-first); reader unpacks to uint16.
+    # Only applies when pyramid=True. None = no packing.
+    l2_packed_bits: Optional[int] = None
+
     def format_str(self) -> str:
         has_outlier = self.outlier_cols is not None
+        if self.pyramid:
+            return "pq2d_v1_pyramid"
         if self.n_levels == 1:
             return "pq2d_v1_l1"
         if self.n_levels == 2 and not has_outlier:
@@ -93,14 +106,30 @@ def _check(t: PQTensor) -> None:
         for arr in (t.codebook_l2_l, t.codebook_l2_r, t.indices_l2_l, t.indices_l2_r):
             assert arr is not None, "n_levels=2 requires level-2 arrays"
         K_l2 = t.K_l2_effective()
-        assert K_l2 in (16, 64, 256), f"K_l2 must be 16, 64, or 256; got {K_l2}"
+        if t.pyramid:
+            # Pyramid: K_l2 = K_outer * K_inner, arbitrary value (no {16,64,256}
+            # restriction). Indices are uint8 if K_l2 <= 256, uint16 otherwise.
+            assert K_l2 > 0, f"pyramid K_l2 must be positive; got {K_l2}"
+            assert K_l2 <= 65535, f"pyramid K_l2 must fit in uint16; got {K_l2}"
+        else:
+            assert K_l2 in (16, 64, 256), f"K_l2 must be 16, 64, or 256; got {K_l2}"
         assert t.codebook_l2_l.shape == (K_l2, t.G // 2) and t.codebook_l2_l.dtype == np.float16
         assert t.codebook_l2_r.shape == (K_l2, t.G // 2) and t.codebook_l2_r.dtype == np.float16
         if t.l2_packed():
-            # Bit-packed: ceil(C / 2) bytes per row, 2 indices/byte.
             packed_C = (C + 1) // 2
             assert t.indices_l2_l.shape == (M, packed_C) and t.indices_l2_l.dtype == np.uint8
             assert t.indices_l2_r.shape == (M, packed_C) and t.indices_l2_r.dtype == np.uint8
+        elif t.l2_packed_bits and t.pyramid:
+            # Phase 1.5: bit-packed indices stored as uint16 in memory; writer
+            # packs to N bits/index on disk. Validate that indices fit in K_l2.
+            assert t.indices_l2_l.shape == (M, C) and t.indices_l2_l.dtype == np.uint16
+            assert t.indices_l2_r.shape == (M, C) and t.indices_l2_r.dtype == np.uint16
+            assert int(t.indices_l2_l.max()) < K_l2
+            assert int(t.indices_l2_r.max()) < K_l2
+        elif t.pyramid and K_l2 > 256:
+            # Pyramid with K_l2 > 256: uint16 indices
+            assert t.indices_l2_l.shape == (M, C) and t.indices_l2_l.dtype == np.uint16
+            assert t.indices_l2_r.shape == (M, C) and t.indices_l2_r.dtype == np.uint16
         else:
             assert t.indices_l2_l.shape == (M, C) and t.indices_l2_l.dtype == np.uint8
             assert t.indices_l2_r.shape == (M, C) and t.indices_l2_r.dtype == np.uint8
@@ -169,18 +198,66 @@ def reconstruct(t: PQTensor) -> np.ndarray:
     return W
 
 
-def write_multi_tensor(path: str | Path, tensors: dict[str, PQTensor]) -> None:
+_RAW_DTYPES = {
+    "float32": np.float32, "float16": np.float16,
+    "int32":   np.int32,   "int16":   np.int16,
+    "int8":    np.int8,    "uint8":   np.uint8,
+    "uint16":  np.uint16,
+}
+
+
+def _raw_dtype_name(dt: np.dtype) -> str | None:
+    for name, cls in _RAW_DTYPES.items():
+        if dt == np.dtype(cls):
+            return name
+    return None
+
+
+def write_multi_tensor(
+    path: str | Path,
+    tensors: dict[str, PQTensor],
+    *,
+    raw_tensors: dict[str, np.ndarray] | None = None,
+    config: dict | None = None,
+) -> None:
     """Write a multi-tensor IBF v5 file.
 
     Each tensor's blocks are written as `<name>::<key>` in the JSON header
     so block keys remain unique. Block layout per tensor matches
     write_single_tensor; offsets are still relative to weight_data_start.
+
+    Phase 9: optional raw_tensors (np.ndarray, any dtype in _RAW_DTYPES)
+    and a free-form config dict (e.g. transformer config: num_layers,
+    num_heads, rope_theta, etc.) — both consumed by inferbit_pq_forward.
     """
+    raw_tensors = raw_tensors or {}
+    config = config or {}
     blocks: list[tuple[str, bytes]] = []
     tensor_order: list[str] = []
 
     def add(qkey: str, arr: np.ndarray) -> None:
         blocks.append((qkey, np.ascontiguousarray(arr).tobytes()))
+
+    def add_packed(qkey: str, arr_u16: np.ndarray, n_bits: int) -> None:
+        """Pack 2D uint16 array per-row into N-bit byte stream, LSB-first.
+        Each row is packed independently with its own padding to byte boundary,
+        matching the C reader's per-row striding."""
+        assert arr_u16.ndim == 2
+        M_rows, C_cols = arr_u16.shape
+        bytes_per_row = (C_cols * n_bits + 7) // 8
+        out = np.zeros((M_rows, bytes_per_row), dtype=np.uint8)
+        for r in range(M_rows):
+            row = arr_u16[r].astype(np.uint16)
+            bits = np.zeros((C_cols, n_bits), dtype=np.uint8)
+            for b in range(n_bits):
+                bits[:, b] = ((row >> b) & 1).astype(np.uint8)
+            bits_flat = bits.reshape(-1)
+            pad = (-bits_flat.size) % 8
+            if pad:
+                bits_flat = np.concatenate([bits_flat, np.zeros(pad, dtype=np.uint8)])
+            packed = np.packbits(bits_flat, bitorder="little")
+            out[r, :bytes_per_row] = packed[:bytes_per_row]
+        blocks.append((qkey, out.tobytes()))
 
     for name, t in tensors.items():
         _check(t)
@@ -197,15 +274,34 @@ def write_multi_tensor(path: str | Path, tensors: dict[str, PQTensor]) -> None:
         if t.n_levels == 2:
             add(keyed("codebook_l2_l"), t.codebook_l2_l)
             add(keyed("codebook_l2_r"), t.codebook_l2_r)
-            add(keyed("indices_l2_l"), t.indices_l2_l)
-            add(keyed("indices_l2_r"), t.indices_l2_r)
+            if t.l2_packed_bits and t.pyramid and not t.l2_packed():
+                add_packed(keyed("indices_l2_l"), t.indices_l2_l, t.l2_packed_bits)
+                add_packed(keyed("indices_l2_r"), t.indices_l2_r, t.l2_packed_bits)
+            else:
+                add(keyed("indices_l2_l"), t.indices_l2_l)
+                add(keyed("indices_l2_r"), t.indices_l2_r)
         if t.outlier_cols is not None:
             add(keyed("outlier_cols"), t.outlier_cols)
             add(keyed("outlier_sidecar"), t.outlier_sidecar)
             add(keyed("outlier_scale"), t.outlier_scale)
 
+    # Phase 9: append raw tensors as their own blocks.
+    raw_meta: dict[str, dict] = {}
+    for rname, arr in raw_tensors.items():
+        dtype_name = _raw_dtype_name(arr.dtype)
+        if dtype_name is None:
+            raise ValueError(f"raw tensor {rname}: unsupported dtype {arr.dtype}")
+        arr = np.ascontiguousarray(arr)
+        qkey = f"_raw::{rname}"
+        blocks.append((qkey, arr.tobytes()))
+        raw_meta[rname] = {
+            "dtype": dtype_name,
+            "shape": list(arr.shape),
+        }
+
     # Reserve a generous JSON header for multi-tensor models.
-    json_reserve = max(32 * 1024, 2048 * len(tensor_order))
+    json_reserve = max(32 * 1024, 2048 * len(tensor_order),
+                        128 * (len(raw_tensors) + len(tensor_order)))
     weight_data_start = _align(IBF_PREAMBLE + json_reserve)
 
     offsets: dict[str, tuple[int, int]] = {}
@@ -228,6 +324,8 @@ def write_multi_tensor(path: str | Path, tensors: dict[str, PQTensor]) -> None:
         }
         if t.n_levels == 2 and t.K_l2 is not None and t.K_l2 != t.K:
             meta["K_l2"] = t.K_l2
+        if t.l2_packed_bits and t.pyramid and not t.l2_packed():
+            meta["l2_packed_bits"] = int(t.l2_packed_bits)
         if t.outlier_cols is not None:
             meta["outlier"] = {"n_cols": int(t.outlier_cols.shape[0])}
 
@@ -241,11 +339,21 @@ def write_multi_tensor(path: str | Path, tensors: dict[str, PQTensor]) -> None:
             meta[k] = {"offset": off - weight_data_start, "size": sz}
         tensors_json[name] = meta
 
+    # Fill in raw-tensor offsets now that we know the layout.
+    for rname in raw_meta:
+        off, sz = offsets[f"_raw::{rname}"]
+        raw_meta[rname]["offset"] = off - weight_data_start
+        raw_meta[rname]["size"] = sz
+
     header = {
         "ibf_version": IBF_VERSION,
         "tensors": tensors_json,
         "weight_data_start": weight_data_start,
     }
+    if raw_meta:
+        header["raw_tensors"] = raw_meta
+    if config:
+        header["config"] = config
     header_bytes = json.dumps(header).encode("utf-8")
     if len(header_bytes) > json_reserve:
         raise RuntimeError(f"json header {len(header_bytes)} > reserve {json_reserve}")
@@ -269,9 +377,18 @@ def write_multi_tensor(path: str | Path, tensors: dict[str, PQTensor]) -> None:
             f.write(b"\x00")
 
 
-def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
-    """Read a multi-tensor IBF v5 file written by `write_multi_tensor`."""
+def read_multi_tensor(
+    path: str | Path,
+    *,
+    return_extras: bool = False,
+):
+    """Read a multi-tensor IBF v5 file written by `write_multi_tensor`.
+
+    return_extras=True returns (pq_tensors, raw_tensors, config).
+    """
     out: dict[str, PQTensor] = {}
+    raw_out: dict[str, np.ndarray] = {}
+    cfg_out: dict = {}
     with open(path, "rb") as f:
         preamble = f.read(IBF_PREAMBLE)
         assert preamble[:8] == IBF_MAGIC
@@ -297,6 +414,8 @@ def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
             n_inner = N - n_outlier
             assert n_inner % G == 0
             C = n_inner // G
+            is_pyramid = m.get("format") == "pq2d_v1_pyramid"
+            l2_packed_bits = m.get("l2_packed_bits", 0)
 
             t = PQTensor(
                 shape=(M, N), G=G, K=K, n_levels=n_levels, rotate=bool(m["rotate"]),
@@ -306,6 +425,7 @@ def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
                 indices_l1_l=load("indices_l1_l", np.uint8, (M, C)),
                 indices_l1_r=load("indices_l1_r", np.uint8, (M, C)),
                 row_scale=load("row_scale", np.float16, (M,)),
+                pyramid=is_pyramid,
             )
             if n_levels == 2:
                 K_l2_eff = K_l2 if K_l2 is not None else K
@@ -315,6 +435,25 @@ def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
                     packed_C = (C + 1) // 2
                     t.indices_l2_l = load("indices_l2_l", np.uint8, (M, packed_C))
                     t.indices_l2_r = load("indices_l2_r", np.uint8, (M, packed_C))
+                elif is_pyramid and l2_packed_bits > 0:
+                    # Phase 1.5: bit-packed L2 indices on disk; unpack to uint16.
+                    n_bytes_per_row = (C * l2_packed_bits + 7) // 8
+                    raw_l = load("indices_l2_l", np.uint8, (M, n_bytes_per_row))
+                    raw_r = load("indices_l2_r", np.uint8, (M, n_bytes_per_row))
+                    def _unpack(raw, M, C, n_bits):
+                        out = np.zeros((M, C), dtype=np.uint16)
+                        for r in range(M):
+                            bits = np.unpackbits(raw[r], bitorder="little")[: C * n_bits]
+                            bits = bits.reshape(C, n_bits)
+                            for b in range(n_bits):
+                                out[r] |= (bits[:, b].astype(np.uint16) << b)
+                        return out
+                    t.indices_l2_l = _unpack(raw_l, M, C, l2_packed_bits)
+                    t.indices_l2_r = _unpack(raw_r, M, C, l2_packed_bits)
+                    t.l2_packed_bits = l2_packed_bits
+                elif is_pyramid and K_l2_eff > 256:
+                    t.indices_l2_l = load("indices_l2_l", np.uint16, (M, C))
+                    t.indices_l2_r = load("indices_l2_r", np.uint16, (M, C))
                 else:
                     t.indices_l2_l = load("indices_l2_l", np.uint8, (M, C))
                     t.indices_l2_r = load("indices_l2_r", np.uint8, (M, C))
@@ -323,6 +462,16 @@ def read_multi_tensor(path: str | Path) -> dict[str, PQTensor]:
                 t.outlier_sidecar = load("outlier_sidecar", np.int8, (M, n_outlier))
                 t.outlier_scale   = load("outlier_scale", np.float16, (n_outlier,))
             out[name] = t
+
+        for rname, m in header.get("raw_tensors", {}).items():
+            dtype = _RAW_DTYPES[m["dtype"]]
+            f.seek(m["offset"] + weight_data_start)
+            buf = f.read(m["size"])
+            raw_out[rname] = np.frombuffer(buf, dtype=dtype).reshape(m["shape"]).copy()
+        cfg_out = header.get("config", {})
+
+    if return_extras:
+        return out, raw_out, cfg_out
     return out
 
 
