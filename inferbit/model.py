@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ctypes
-from ctypes import c_int32, c_float, POINTER
+from ctypes import c_int, c_int32, c_float, POINTER
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -26,9 +26,16 @@ class InferbitModel:
         threads: int = 0,
         context_length: int = 0,
         kv_dynamic: bool = False,
+        kv_window: int = 0,
         tokenizer=None,
     ) -> "InferbitModel":
-        """Load a pre-converted .ibf model."""
+        """Load a pre-converted .ibf model.
+
+        kv_window: rotating KV-cache window (doc 36 phase 2.2). 0 = full
+        causal cache (default). >0 = ring buffer of `kv_window` token
+        slots — peak KV RAM becomes O(kv_window) instead of
+        O(context_length), at the cost of a sliding attention horizon.
+        """
         lib = _get_lib()
 
         config = lib.inferbit_config_create()
@@ -41,6 +48,8 @@ class InferbitModel:
             lib.inferbit_config_set_context_length(config, context_length)
         if kv_dynamic:
             lib.inferbit_config_set_kv_cache_dynamic(config, 1)
+        if kv_window > 0:
+            lib.inferbit_config_set_kv_window(config, kv_window)
 
         ptr = lib.inferbit_load(path.encode(), config)
         lib.inferbit_config_free(config)
@@ -203,6 +212,61 @@ class InferbitModel:
             raise RuntimeError(f"Forward pass failed: {msg}")
 
         return list(out_arr)
+
+    @staticmethod
+    def build_target_layer_ids(n_target_layers: int, n_draft_layers: int) -> list[int]:
+        """Evenly-spaced target-layer indices for hidden-state capture
+        (doc 36 phase 4.1, mirrors dflash's build_target_layer_ids).
+        Skips the first/last 3 layers; returns ascending indices."""
+        lib = _get_lib()
+        buf = (c_int * max(n_draft_layers, 1))()
+        count = lib.inferbit_build_target_layer_ids(
+            n_target_layers, n_draft_layers, buf
+        )
+        return [buf[i] for i in range(count)]
+
+    def forward_with_hiddens(self, tokens: list[int], layer_ids: list[int]):
+        """Prefill forward that also captures per-layer hidden states
+        (doc 36 phase 4.1). Runs on the Metal backend; the GPU context is
+        created lazily on first call and cached on the model.
+
+        Returns (logits, hiddens) where:
+          logits  — numpy array [n_tokens, vocab_size]
+          hiddens — dict {layer_id: numpy array [n_tokens, hidden_size]}
+
+        Intended for the DFlash hybrid orchestrator: the draft model
+        conditions its K-token predictions on the target's mid-stack
+        hidden states.
+        """
+        import numpy as np
+
+        n = len(tokens)
+        if n == 0:
+            raise ValueError("tokens must be non-empty")
+        n_layers = len(layer_ids)
+        if n_layers == 0:
+            raise ValueError("layer_ids must be non-empty")
+        hidden = self.hidden_size
+        vocab = self.vocab_size
+
+        tok_arr = (c_int32 * n)(*tokens)
+        lid_arr = (c_int * n_layers)(*layer_ids)
+        # Caller-allocated output buffers; the C side fills them in place.
+        hiddens = np.zeros((n_layers, n, hidden), dtype=np.float32)
+        logits = np.zeros((n, vocab), dtype=np.float32)
+
+        rc = self._lib.inferbit_forward_with_hiddens(
+            self._ptr, tok_arr, n, lid_arr, n_layers,
+            hiddens.ctypes.data_as(POINTER(c_float)),
+            logits.ctypes.data_as(POINTER(c_float)),
+        )
+        if rc != 0:
+            err = self._lib.inferbit_last_error()
+            msg = err.decode() if err else "unknown error"
+            raise RuntimeError(f"forward_with_hiddens failed: {msg}")
+
+        hidden_map = {lid: hiddens[i] for i, lid in enumerate(layer_ids)}
+        return logits, hidden_map
 
     # ── KV cache ────────────────────────────────────────────────
 

@@ -100,6 +100,7 @@ def _setup_signatures(lib):
     lib.inferbit_config_set_threads.argtypes = [c_void_p, c_int]
     lib.inferbit_config_set_context_length.argtypes = [c_void_p, c_int]
     lib.inferbit_config_set_kv_cache_dynamic.argtypes = [c_void_p, c_int]
+    lib.inferbit_config_set_kv_window.argtypes = [c_void_p, c_int]
 
     # Model lifecycle
     lib.inferbit_load.restype = c_void_p
@@ -128,6 +129,24 @@ def _setup_signatures(lib):
     lib.inferbit_forward.argtypes = [
         c_void_p, POINTER(c_int32), c_int,
         POINTER(c_float), c_int,
+    ]
+
+    # Hidden-state capture (doc 36 phase 4.1)
+    lib.inferbit_forward_with_hiddens.restype = c_int
+    lib.inferbit_forward_with_hiddens.argtypes = [
+        c_void_p,            # model
+        POINTER(c_int32),    # tokens
+        c_int,               # n_tokens
+        POINTER(c_int),      # layer_ids
+        c_int,               # n_layer_ids
+        POINTER(c_float),    # hiddens_out [n_layer_ids][n_tokens][hidden]
+        POINTER(c_float),    # logits_out  [n_tokens][vocab]
+    ]
+    lib.inferbit_build_target_layer_ids.restype = c_int
+    lib.inferbit_build_target_layer_ids.argtypes = [
+        c_int,               # n_target_layers
+        c_int,               # n_draft_layers
+        POINTER(c_int),      # out_ids
     ]
 
     # KV cache
