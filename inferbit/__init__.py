@@ -7,7 +7,7 @@ from .eval import EvalGates, EvalResult, evaluate_model_gates, load_token_sample
 from .calibrate import QuantProfile, CalibrateResult, search_quantization_profile
 from .pq_session import Session, STREAMING, L1_ONLY, L2SKIP, SPARSE, INT8
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = [
     "InferbitModel",
     "convert",
