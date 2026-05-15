@@ -17,7 +17,7 @@ def convert(
     bits: int = 4,
     sensitive_bits: int = 8,
     sparsity: float = 0.0,
-    kv_bits: int = 8,
+    kv_bits: int = 16,
     threads: int = 0,
     progress: Optional[Callable[[float, str], None]] = None,
 ) -> str:
@@ -30,7 +30,10 @@ def convert(
         bits: Default quantization bits (2, 4, 8)
         sensitive_bits: Bits for attention/embeddings (4, 8)
         sparsity: Target structured sparsity (0.0-0.6)
-        kv_bits: KV cache quantization bits
+        kv_bits: KV cache quantization bits. 16 = fp32 KV (default):
+            quality-safe and on the GPU fast prefill path. 8 = INT8 KV:
+            smaller, but takes a slower per-position attention fallback —
+            only worth it at long context where KV memory traffic dominates.
         threads: CPU threads (0 = auto)
         progress: Optional callback(percent, stage)
 
@@ -45,6 +48,14 @@ def convert(
             source = resolved
         elif source.startswith("ollama://"):
             raise RuntimeError(f"Ollama model not found: {source}")
+
+    if kv_bits == 8:
+        import sys
+        print(
+            "warning: kv_bits=8 uses the slower per-position GPU attention "
+            "path; kv_bits=16 is recommended for throughput",
+            file=sys.stderr,
+        )
 
     lib = _get_lib()
 
