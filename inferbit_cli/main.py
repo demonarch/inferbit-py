@@ -19,9 +19,14 @@ app = typer.Typer(
 def quantize(
     source: str = typer.Argument(help="Model path or HuggingFace ID"),
     output: str = typer.Option(None, "--output", "-o", help="Output .ibf path"),
-    bits: int = typer.Option(4, "--bits", help="Default quantization bits"),
-    sensitive_bits: int = typer.Option(8, "--sensitive-bits", help="Bits for attention/embeddings"),
-    sparsity: float = typer.Option(0.0, "--sparsity", help="Target structured sparsity"),
+    format: str = typer.Option(
+        "int4", "--format",
+        help="Quantization family: 'int4' (INT4-blk32 + INT8, default), "
+             "'pqv2' (flat PQv2 n_levels=1), 'pyramid' (PQv2 n_levels=2)",
+    ),
+    bits: int = typer.Option(4, "--bits", help="Default quantization bits (int4 format only)"),
+    sensitive_bits: int = typer.Option(8, "--sensitive-bits", help="Bits for attention/embeddings (int4 format only)"),
+    sparsity: float = typer.Option(0.0, "--sparsity", help="Target structured sparsity (int4 format only)"),
     auto_calibrate: bool = typer.Option(False, "--auto-calibrate", help="Run INT2->INT4->INT8 gate search and use first passing profile"),
     dataset: str = typer.Option(None, "--dataset", help="JSONL token dataset for perplexity gate during auto-calibrate"),
     max_perplexity: float = typer.Option(None, "--max-perplexity", help="Gate for auto-calibrate"),
@@ -31,6 +36,63 @@ def quantize(
     warmup: int = typer.Option(1, "--warmup", help="Warmup runs for auto-calibrate"),
     runs: int = typer.Option(3, "--runs", help="Measured runs for auto-calibrate"),
     threads: int = typer.Option(0, "--threads", help="Threads for conversion/eval"),
+    # Stage 3a — Mixture-of-Mini-Experts (MoME). >1 splits each FFN
+    # tensor into K equal row-slice experts. Default 1 = off.
+    mome_experts: int = typer.Option(
+        1, "--mome-experts",
+        help="MoME row-slice expert count for FFN tensors (1 = off; "
+             "valid: 1,2,4,8,16). Stage 3a of docs/v2/00_CORRECTION.md.",
+    ),
+    # Stage 5k — lower-precision scales.
+    scale_precision: int = typer.Option(
+        0, "--scale-precision",
+        help="Scale precision: 0 = fp16 row + fp16 codebook (default), "
+             "2 = int8 row + fp8 codebook. Stage 5k.",
+    ),
+    # Stage 5j — codebook pool dedup scaffolding.
+    codebook_dedup: bool = typer.Option(
+        False, "--codebook-dedup",
+        help="Emit codebook pool with identity mapping (Stage 5j "
+             "scaffolding; bit-identical to default in v1).",
+    ),
+    # Stage 5b — per-tensor-class format overrides. Empty -> use --format.
+    format_ffn: str = typer.Option(
+        "", "--format-ffn",
+        help="Override format for FFN tensors (gate/up/down). "
+             "Values: int4|pqv2|pyramid. Empty = use --format.",
+    ),
+    format_attn: str = typer.Option(
+        "", "--format-attn",
+        help="Override format for attention tensors (Q/K/V/O). "
+             "Values: int4|pqv2|pyramid. Empty = use --format.",
+    ),
+    format_embed: str = typer.Option(
+        "", "--format-embed",
+        help="Override format for token_embedding. "
+             "Values: int4|pqv2|pyramid. Empty = use --format.",
+    ),
+    format_lm_head: str = typer.Option(
+        "", "--format-lm-head",
+        help="Override format for lm_head. "
+             "Values: int4|pqv2|pyramid. Empty = use --format.",
+    ),
+    # Stage 5c — per-tensor-class residency hints.
+    residency_ffn: str = typer.Option(
+        "auto", "--residency-ffn",
+        help="Residency hint for FFN tensors. Values: auto|ram|drive.",
+    ),
+    residency_attn: str = typer.Option(
+        "auto", "--residency-attn",
+        help="Residency hint for attention tensors. Values: auto|ram|drive.",
+    ),
+    residency_embed: str = typer.Option(
+        "auto", "--residency-embed",
+        help="Residency hint for token_embedding. Values: auto|ram|drive.",
+    ),
+    residency_lm_head: str = typer.Option(
+        "auto", "--residency-lm-head",
+        help="Residency hint for lm_head. Values: auto|ram|drive.",
+    ),
 ):
     """Convert a model to .ibf format."""
     from rich.console import Console
@@ -38,13 +100,65 @@ def quantize(
 
     console = Console()
 
+    fmt = format.lower()
+    if fmt not in ("int4", "pqv2", "pyramid"):
+        console.print(f"[red]invalid --format {format!r}; expected one of int4, pqv2, pyramid[/red]")
+        raise typer.Exit(2)
+
+    # Stage 5b — validate per-class format overrides up front so users get
+    # a clear CLI error instead of a deep ValueError from convert().
+    _valid_fmts = ("", "int4", "pqv2", "pyramid")
+    _per_class_fmts = {
+        "--format-ffn":     format_ffn,
+        "--format-attn":    format_attn,
+        "--format-embed":   format_embed,
+        "--format-lm-head": format_lm_head,
+    }
+    for flag, val in _per_class_fmts.items():
+        if val.lower() not in _valid_fmts:
+            console.print(
+                f"[red]invalid {flag} {val!r}; expected one of int4, pqv2, pyramid (or empty)[/red]"
+            )
+            raise typer.Exit(2)
+
+    # Stage 5c — validate per-class residency hints.
+    _valid_res = ("auto", "ram", "drive")
+    _per_class_res = {
+        "--residency-ffn":     residency_ffn,
+        "--residency-attn":    residency_attn,
+        "--residency-embed":   residency_embed,
+        "--residency-lm-head": residency_lm_head,
+    }
+    for flag, val in _per_class_res.items():
+        if val.lower() not in _valid_res:
+            console.print(
+                f"[red]invalid {flag} {val!r}; expected one of auto, ram, drive[/red]"
+            )
+            raise typer.Exit(2)
+
+    # Normalize to lowercase for downstream consumers.
+    format_ffn     = format_ffn.lower()
+    format_attn    = format_attn.lower()
+    format_embed   = format_embed.lower()
+    format_lm_head = format_lm_head.lower()
+    residency_ffn     = residency_ffn.lower()
+    residency_attn    = residency_attn.lower()
+    residency_embed   = residency_embed.lower()
+    residency_lm_head = residency_lm_head.lower()
+
     if output is None:
         import os
         safe = source.replace("/", "--")
-        output = f"{safe}-int{bits}.ibf"
+        if fmt == "int4":
+            output = f"{safe}-int{bits}.ibf"
+        elif fmt == "pqv2":
+            output = f"{safe}-pqv2.ibf"
+        else:
+            output = f"{safe}-pyramid.ibf"
 
     console.print(f"Source:  {source}")
     console.print(f"Output:  {output}")
+    console.print(f"Format:  {fmt}")
 
     if auto_calibrate:
         import os
@@ -82,7 +196,8 @@ def quantize(
         )
         return
 
-    console.print(f"Bits:    {bits} (sensitive: {sensitive_bits})")
+    if fmt == "int4":
+        console.print(f"Bits:    {bits} (sensitive: {sensitive_bits})")
 
     with Progress(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
@@ -99,18 +214,42 @@ def quantize(
             from inferbit import convert
             convert(
                 source, output,
+                format=fmt,
                 bits=bits, sensitive_bits=sensitive_bits,
                 sparsity=sparsity,
                 threads=threads,
                 progress=on_progress,
+                mome_experts=mome_experts,
+                scale_precision=scale_precision,
+                codebook_dedup=codebook_dedup,
+                format_ffn=format_ffn,
+                format_attn=format_attn,
+                format_embed=format_embed,
+                format_lm_head=format_lm_head,
+                residency_ffn=residency_ffn,
+                residency_attn=residency_attn,
+                residency_embed=residency_embed,
+                residency_lm_head=residency_lm_head,
             )
         else:
             from inferbit import convert_pretrained
             convert_pretrained(
                 source,
+                format=fmt,
                 bits=bits, sensitive_bits=sensitive_bits,
-                cache_dir=os.path.dirname(output) or ".",
+                output=output,
                 progress=on_progress,
+                mome_experts=mome_experts,
+                scale_precision=scale_precision,
+                codebook_dedup=codebook_dedup,
+                format_ffn=format_ffn,
+                format_attn=format_attn,
+                format_embed=format_embed,
+                format_lm_head=format_lm_head,
+                residency_ffn=residency_ffn,
+                residency_attn=residency_attn,
+                residency_embed=residency_embed,
+                residency_lm_head=residency_lm_head,
             )
 
     size_mb = os.path.getsize(output) / (1024 * 1024)
@@ -466,6 +605,94 @@ def serve(
     import uvicorn
     console.print(f"Serving on http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+@app.command()
+def pack(
+    source: str = typer.Argument(help="Input .ibf model file"),
+    output: str = typer.Option(
+        None, "--output", "-o",
+        help="Output path (default: <source>.zst)",
+    ),
+    level: int = typer.Option(
+        19, "--level",
+        help="Zstd compression level 1..22 (default 19, long-range mode)",
+    ),
+):
+    """Compress an .ibf -> .ibf.zst for distribution.
+
+    Distribution-time compression only — the runtime loader never
+    auto-decompresses. Recipients call ``inferbit unpack`` once at
+    install before ``inferbit load``. See docs/v2/00_CORRECTION.md
+    Stage 5i.
+    """
+    from rich.console import Console
+    console = Console()
+
+    if output is None:
+        output = source + ".zst"
+
+    import os
+    if not os.path.exists(source):
+        console.print(f"[red]Source not found: {source}[/red]")
+        raise typer.Exit(2)
+
+    from inferbit import pack as _pack
+    try:
+        _pack(source, output, level=level)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    in_sz = os.path.getsize(source)
+    out_sz = os.path.getsize(output)
+    ratio = (out_sz / in_sz) if in_sz > 0 else 0.0
+    console.print(
+        f"{source} ({in_sz / 1024 / 1024:.1f} MB) -> "
+        f"{output} ({out_sz / 1024 / 1024:.1f} MB, ratio {ratio:.2%})"
+    )
+
+
+@app.command()
+def unpack(
+    source: str = typer.Argument(help="Input .ibf.zst file"),
+    output: str = typer.Option(
+        None, "--output", "-o",
+        help="Output path (default: <source> with .zst stripped)",
+    ),
+):
+    """Decompress an .ibf.zst back to .ibf.
+
+    Round-trip bit-identical: the SHA of the unpacked .ibf matches
+    the source that was packed.
+    """
+    from rich.console import Console
+    console = Console()
+
+    import os
+    if not os.path.exists(source):
+        console.print(f"[red]Source not found: {source}[/red]")
+        raise typer.Exit(2)
+
+    if output is None:
+        if source.endswith(".zst"):
+            output = source[: -len(".zst")]
+        else:
+            output = source + ".ibf"
+
+    from inferbit import unpack as _unpack
+    try:
+        _unpack(source, output)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    in_sz = os.path.getsize(source)
+    out_sz = os.path.getsize(output)
+    console.print(
+        f"{source} ({in_sz / 1024 / 1024:.1f} MB) -> "
+        f"{output} ({out_sz / 1024 / 1024:.1f} MB)"
+    )
 
 
 if __name__ == "__main__":

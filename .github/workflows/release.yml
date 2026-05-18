@@ -19,7 +19,7 @@ jobs:
           - os: macos-14
             plat: macosx_11_0_arm64
             lib: libinferbit.dylib
-            cmake_extra: ""
+            cmake_extra: "-DIB_ENABLE_METAL=ON"
             can_test: true
 
           # macOS Intel (cross-compile on ARM runner)

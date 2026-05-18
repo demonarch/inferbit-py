@@ -168,6 +168,12 @@ Any LLaMA-family architecture with public weights:
 
 ## Benchmarks
 
+> **Correction (2026-05-17):** the "InferBit PQv2" rows below
+> were actually measured against `InferBit INT4-blk32 + INT8`,
+> not PQv2. The production convert path didn't emit PQ-format
+> tensors in v0.4.1. Real PQv2 (incl. pyramid) is being wired
+> for v0.4.2 — see [`docs/v2/00_CORRECTION.md`](https://github.com/inferbit/inferbit/blob/main/docs/v2/00_CORRECTION.md).
+
 Apple M4, full v0.4.1 cross-engine matrix. Perplexity measured on
 the same tokenized 2048-token wikitext window for both engines
 (llama.cpp's tokenization fed to both `bench_ppl_run` and

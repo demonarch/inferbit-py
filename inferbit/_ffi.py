@@ -60,7 +60,32 @@ VARIANT_SPARSE = 3
 VARIANT_INT8 = 4
 
 
+# Stage 5b — per-tensor class taxonomy (mirrors inferbit_tensor_class
+# in include/inferbit.h). Used to index per_class_format[] and
+# per_class_residency[].
+INFERBIT_TENSOR_CLASS_FFN_GATE = 0
+INFERBIT_TENSOR_CLASS_FFN_UP   = 1
+INFERBIT_TENSOR_CLASS_FFN_DOWN = 2
+INFERBIT_TENSOR_CLASS_ATTN_Q   = 3
+INFERBIT_TENSOR_CLASS_ATTN_K   = 4
+INFERBIT_TENSOR_CLASS_ATTN_V   = 5
+INFERBIT_TENSOR_CLASS_ATTN_O   = 6
+INFERBIT_TENSOR_CLASS_EMBED    = 7
+INFERBIT_TENSOR_CLASS_LM_HEAD  = 8
+INFERBIT_TENSOR_CLASS_COUNT    = 9
+
+
+# Stage 5c — residency hint enum (mirrors inferbit_residency in
+# include/inferbit.h).
+INFERBIT_RESIDENCY_AUTO  = 0
+INFERBIT_RESIDENCY_RAM   = 1
+INFERBIT_RESIDENCY_DRIVE = 2
+
+
 class ConvertConfig(Structure):
+    # Field order MUST exactly match `inferbit_convert_config` in
+    # modules/libinferbit/include/inferbit.h (ctypes Structure is
+    # positional). Any drift here writes values into the wrong slots.
     _fields_ = [
         ("default_bits", c_int),
         ("sensitive_bits", c_int),
@@ -68,9 +93,32 @@ class ConvertConfig(Structure):
         ("block_size", c_int),
         ("kv_bits", c_int),
         ("threads", c_int),
-        ("progress", c_void_p),  # Function pointer — set separately
+        ("progress", c_void_p),       # Function pointer — set separately
         ("progress_ctx", c_void_p),
+        # inferbit_convert_format enum (see include/inferbit.h).
+        ("format", c_int),
+        # Stage 3a — post-hoc Mixture-of-Mini-Experts. Row-slice expert
+        # count for FFN tensors. Default 1 = no MoME.
+        ("mome_experts", c_int),
+        # Stage 5b — per-tensor-class format override. Index by
+        # INFERBIT_TENSOR_CLASS_*. Entry == 0 means "use cfg.format".
+        ("per_class_format", c_int * INFERBIT_TENSOR_CLASS_COUNT),
+        # Stage 5c — per-tensor-class residency hint. Index by
+        # INFERBIT_TENSOR_CLASS_*. Entry == 0 means AUTO (loader picks).
+        ("per_class_residency", c_int * INFERBIT_TENSOR_CLASS_COUNT),
+        # Stage 5k — lower-precision row/codebook scales.
+        # 0 = legacy fp16/fp16 (default). 2 = int8 row + fp8 cb_scale.
+        ("scale_precision", c_int),
+        # Stage 5j — codebook + scale dedup. 0 = off (default).
+        # 1 = emit identity pool_id mapping (scaffolding).
+        ("codebook_dedup", c_int),
     ]
+
+
+# inferbit_convert_format enum mirrors include/inferbit.h.
+INFERBIT_CONVERT_INT4 = 0
+INFERBIT_CONVERT_PQV2_FLAT = 1
+INFERBIT_CONVERT_PQV2_PYRAMID = 2
 
 
 # Callback types
@@ -192,6 +240,13 @@ def _setup_signatures(lib):
     lib.inferbit_detect_format.argtypes = [c_char_p]
     lib.inferbit_convert.restype = c_int
     lib.inferbit_convert.argtypes = [c_char_p, c_char_p, POINTER(ConvertConfig)]
+
+    # Distribution-time compression (Stage 5i — docs/v2/00_CORRECTION.md).
+    # Both return 0 on success, -1 on failure (use inferbit_last_error()).
+    lib.inferbit_pack.restype = c_int
+    lib.inferbit_pack.argtypes = [c_char_p, c_char_p, c_int]
+    lib.inferbit_unpack.restype = c_int
+    lib.inferbit_unpack.argtypes = [c_char_p, c_char_p]
 
     # ── PQ session (pq_decode.h) ──
     lib.ib_pq_session_open.restype = c_int
