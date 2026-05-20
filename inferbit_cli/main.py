@@ -43,12 +43,6 @@ def quantize(
         help="MoME row-slice expert count for FFN tensors (1 = off; "
              "valid: 1,2,4,8,16). Stage 3a of docs/v2/00_CORRECTION.md.",
     ),
-    # Stage 5k — lower-precision scales.
-    scale_precision: int = typer.Option(
-        0, "--scale-precision",
-        help="Scale precision: 0 = fp16 row + fp16 codebook (default), "
-             "2 = int8 row + fp8 codebook. Stage 5k.",
-    ),
     # Stage 5j — codebook pool dedup scaffolding.
     codebook_dedup: bool = typer.Option(
         False, "--codebook-dedup",
@@ -220,7 +214,6 @@ def quantize(
                 threads=threads,
                 progress=on_progress,
                 mome_experts=mome_experts,
-                scale_precision=scale_precision,
                 codebook_dedup=codebook_dedup,
                 format_ffn=format_ffn,
                 format_attn=format_attn,
@@ -240,7 +233,6 @@ def quantize(
                 output=output,
                 progress=on_progress,
                 mome_experts=mome_experts,
-                scale_precision=scale_precision,
                 codebook_dedup=codebook_dedup,
                 format_ffn=format_ffn,
                 format_attn=format_attn,
