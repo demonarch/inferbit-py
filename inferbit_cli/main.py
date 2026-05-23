@@ -43,6 +43,14 @@ def quantize(
         help="MoME row-slice expert count for FFN tensors (1 = off; "
              "valid: 1,2,4,8,16). Stage 3a of docs/v2/00_CORRECTION.md.",
     ),
+    # FFN k-means cluster count. >1 enables per-block codebook clustering
+    # in the C encoder via IB_FFN_CLUSTERS. Default 1 = off.
+    ffn_clusters: int = typer.Option(
+        1, "--ffn-clusters",
+        help="FFN codebook cluster count for the C encoder "
+             "(1 = off; valid: 1,16,32,64,128,256). "
+             "Sets IB_FFN_CLUSTERS before conversion runs.",
+    ),
     # Stage 5j — codebook pool dedup scaffolding.
     codebook_dedup: bool = typer.Option(
         False, "--codebook-dedup",
@@ -130,6 +138,15 @@ def quantize(
             )
             raise typer.Exit(2)
 
+    # Validate --ffn-clusters.
+    _valid_ffn_clusters = (1, 16, 32, 64, 128, 256)
+    if ffn_clusters not in _valid_ffn_clusters:
+        console.print(
+            f"[red]invalid --ffn-clusters {ffn_clusters!r}; "
+            f"expected one of {list(_valid_ffn_clusters)}[/red]"
+        )
+        raise typer.Exit(2)
+
     # Normalize to lowercase for downstream consumers.
     format_ffn     = format_ffn.lower()
     format_attn    = format_attn.lower()
@@ -193,6 +210,13 @@ def quantize(
     if fmt == "int4":
         console.print(f"Bits:    {bits} (sensitive: {sensitive_bits})")
 
+    import os
+    # Belt-and-suspenders: set IB_FFN_CLUSTERS in the environment so the
+    # C encoder (which reads the env directly) sees the requested value.
+    # convert() also accepts ffn_clusters and re-sets the env on its side.
+    if ffn_clusters > 1:
+        os.environ["IB_FFN_CLUSTERS"] = str(ffn_clusters)
+
     with Progress(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
         BarColumn(), TextColumn("{task.percentage:>3.0f}%"),
@@ -203,7 +227,6 @@ def quantize(
         def on_progress(pct, stage):
             progress.update(task, completed=int(pct * 100), description=stage)
 
-        import os
         if os.path.exists(source):
             from inferbit import convert
             convert(
@@ -214,6 +237,7 @@ def quantize(
                 threads=threads,
                 progress=on_progress,
                 mome_experts=mome_experts,
+                ffn_clusters=ffn_clusters,
                 codebook_dedup=codebook_dedup,
                 format_ffn=format_ffn,
                 format_attn=format_attn,
@@ -233,6 +257,7 @@ def quantize(
                 output=output,
                 progress=on_progress,
                 mome_experts=mome_experts,
+                ffn_clusters=ffn_clusters,
                 codebook_dedup=codebook_dedup,
                 format_ffn=format_ffn,
                 format_attn=format_attn,

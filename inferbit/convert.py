@@ -110,6 +110,10 @@ def convert(
     progress: Optional[Callable[[float, str], None]] = None,
     # Stage 3a — MoME row-slice expert count for FFN tensors. 1 = off.
     mome_experts: int = 1,
+    # FFN codebook cluster count. >1 enables per-block codebook clustering
+    # in the C encoder (read via IB_FFN_CLUSTERS env var). 1 = off.
+    # Valid values: 1, 16, 32, 64, 128, 256.
+    ffn_clusters: int = 1,
     # Stage 5k — scale precision. 0 = legacy fp16/fp16, 2 = int8 row +
     # fp8 codebook scale.
     scale_precision: int = 0,
@@ -201,6 +205,13 @@ def convert(
     cfg.scale_precision = int(scale_precision)
     cfg.codebook_dedup = 1 if codebook_dedup else 0
 
+    # FFN cluster count: the C encoder reads IB_FFN_CLUSTERS from the env.
+    # Set it here (belt-and-suspenders alongside the CLI setting it before
+    # the Progress block) so library callers who call convert() directly
+    # also get the correct env when ffn_clusters > 1.
+    if ffn_clusters > 1:
+        os.environ["IB_FFN_CLUSTERS"] = str(ffn_clusters)
+
     # Stage 5b — per-tensor-class format overrides. Empty string leaves
     # the slot at 0 (= use cfg.format).
     _apply_per_class_format(cfg, "ffn",     format_ffn)
@@ -249,6 +260,9 @@ def convert_pretrained(
     progress: Optional[Callable[[float, str], None]] = None,
     # Stage 3a / 5j / 5k / 5b / 5c knobs — forwarded verbatim to convert().
     mome_experts: int = 1,
+    # FFN codebook cluster count (forwarded to convert(); sets IB_FFN_CLUSTERS).
+    # 1 = off. Valid values: 1, 16, 32, 64, 128, 256.
+    ffn_clusters: int = 1,
     scale_precision: int = 0,
     codebook_dedup: bool = False,
     format_ffn: str = "",
@@ -354,6 +368,7 @@ def convert_pretrained(
         sensitive_bits=sensitive_bits,
         progress=progress,
         mome_experts=mome_experts,
+        ffn_clusters=ffn_clusters,
         scale_precision=scale_precision,
         codebook_dedup=codebook_dedup,
         format_ffn=format_ffn,
